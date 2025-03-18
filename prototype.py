@@ -33,12 +33,6 @@ X_ACCESS_TOKEN = os.environ.get("X_ACCESS_TOKEN")
 X_ACCESS_TOKEN_SECRET = os.environ.get("X_ACCESS_TOKEN_SECRET")
 GROK_API_KEY = os.environ.get("GROK_API_KEY")
 
-# X_API_KEY="t9DYzS4ipO9Qi4Y9gQV8EhPeu"
-# X_API_SECRET="OAa1hnDmrEaCOKFGqiCpDbNdyQvrknEe5nqW44BqNpAXYdWUjb"
-# X_ACCESS_TOKEN="1900025310823014400-sUh83PEIDN2soeT1GJJFnJMjFeKoop"
-# X_ACCESS_TOKEN_SECRET="mbYwR2hzzj0Id7CIO3DbcDzf21DCBnTrU01YbnXX7trOm"
-# X_API_BEARER_TOKEN="AAAAAAAAAAAAAAAAAAAAACqezwEAAAAAuPU28toxvRy51Jze03N1ir8ADD4%3DuPjsmruZLzCeFgSJS6KCcrdn12NioHQ2e6H3I9HrLdN4MAkISY"
-# GROK_API_KEY="xai-D9dTaDyRbdPkDhgkZRzl52rlgwdxpDX5JMGtFdMPvcI95GMKFIXyBA9wsK51IIrASHVKf0syAdRNSYqf"
 
 # Tweepy authentication for staging with v2 compatibility (using Bearer Token)
 client = tweepy.Client(
@@ -359,7 +353,8 @@ def poll_tweets():
     redis_client.expire(PROCESSED_SET_KEY, TTL_SECONDS)
 
     # List of Twitter/X account usernames to poll
-    accounts_to_poll = ["AlexCaruso"]
+    accounts_to_poll = ["CodyBrownBets", "AlexCaruso", "DQUANPICKS","pardonmypick","dlio__"]
+
 
     # Define time range (e.g., last 24 hours)
     end_time = datetime.now(timezone.utc)  # Current UTC time
@@ -397,4 +392,134 @@ def poll_tweets():
             continue
 
         # Poll tweets using v2 endpoint for the user, filtering by time
-      
+        tweets = client.get_users_tweets(
+            id=user_id,
+            tweet_fields=["text", "entities", "created_at", "public_metrics", "attachments", "id", "in_reply_to_user_id"],
+            max_results=10,  # Fetch up to 10 tweets per poll (can adjust if needed)
+            expansions=["attachments.media_keys"],  # For media (images)
+            media_fields=["url"],  # For image URLs
+            start_time=start_time_str,  # Start time in RFC3339 format
+            end_time=end_time_str,  # End time in RFC3339 format
+            since_id=None,  # Optional: Use to track new tweets only (implement pagination if needed)
+        )
+
+        if tweets.data:
+            for tweet in tweets.data:
+                if tweets_processed_for_account >= max_tweets_per_account:
+                    logger.info(f"Staging - Reached maximum of {max_tweets_per_account} tweets for @{screen_name}. Moving to next account...")
+                    break
+
+                tweet_id = tweet.id
+                # Skip if the tweet has already been processed (production-only check)
+                if redis_client.sismember(PROCESSED_SET_KEY, str(tweet_id)):
+                    logger.info(f"Staging - Skipping already processed tweet from @{screen_name} (ID {tweet_id}, created at {tweet.created_at}): {tweet.text}")
+                    continue
+
+                # Skip if the tweet is a reply (in_reply_to_user_id is not None)
+                if tweet.in_reply_to_user_id is not None:
+                    logger.info(f"Staging - Skipping reply tweet from @{screen_name} (ID {tweet_id}, created at {tweet.created_at}): {tweet.text}")
+                    continue
+
+                # Log if the tweet is a retweet (no longer skipping)
+                if tweet.text.startswith("RT @"):
+                    logger.info(f"Staging - Processing retweet from @{screen_name} (ID {tweet_id}, created at {tweet.created_at}): {tweet.text}")
+
+                # Skip potential pinned tweets (e.g., if older than 24 hours)
+                if isinstance(tweet.created_at, datetime):
+                    tweet_datetime = tweet.created_at
+                else:
+                    # Handle string case with space instead of T
+                    tweet_str = str(tweet.created_at).replace(" ", "T")  # Replace space with T for ISO format
+                    tweet_datetime = datetime.fromisoformat(tweet_str)
+                tweet_age = (end_time - tweet_datetime).total_seconds() / 3600
+                if tweet_age > 24:  # Arbitrary check for very old tweets (pinned might be older)
+                    logger.warning(f"Staging - Skipping possible pinned tweet from @{screen_name} (ID {tweet_id}, created at {tweet.created_at}): {tweet.text}")
+                    continue
+
+                logger.info(f"Staging - Processing tweet from @{screen_name} (ID {tweet_id}, created at {tweet.created_at}): {tweet.text}")
+                
+                # Process tweet text and media (if any)
+                tweet_text = tweet.text
+                image_url = None
+                if hasattr(tweets, 'includes') and tweets.includes and 'media' in tweets.includes:
+                    for media in tweets.includes['media']:
+                        if media.type == 'photo':
+                            image_url = media.url
+                            logger.info(f"Staging - Found image URL: {image_url}")
+                            break  # Use the first photo URL
+
+                # Detect pick, prioritizing text over image
+                pick = detect_pick_grok(tweet_text, image_url)
+                if pick:
+                    try:
+                        # Parse the pick JSON to determine type
+                        parsed_pick = json.loads(pick)
+                        if isinstance(parsed_pick, dict) and parsed_pick.get("type") == "parlay":
+                            # Handle parlay as a single unit
+                            pick_str = json.dumps(parsed_pick, sort_keys=True)
+                            if pick_str in seen_picks[screen_name]:
+                                logger.info(f"Staging - Skipping duplicate parlay from @{screen_name} (ID {tweet_id}): {pick}")
+                                continue
+                            seen_picks[screen_name].add(pick_str)
+                            logger.info(f"Staging - Detected unique parlay: {pick}")
+                            track_pick(tweet_id, "pick")
+                            if not has_been_actioned(tweet_id, "retweet"):
+                                logger.info(f"Staging - Simulated retweet of tweet ID {tweet_id} from @{screen_name}")
+                            if not has_commented(tweet_id, my_username):
+                                comment_text = "This parlay was retweeted on my account! Follow for consolidated picks from the biggest sports betting accounts on X"
+                                logger.info(f"Staging - Simulated comment on tweet ID {tweet_id} from @{screen_name} with: {comment_text}")
+                            logger.info(f"Staging - Retweeted and commented on parlay from @{screen_name} (ID {tweet_id}).")
+                        elif isinstance(parsed_pick, list):
+                            # Handle multiple single picks
+                            for single_pick in parsed_pick:
+                                pick_str = json.dumps(single_pick, sort_keys=True)
+                                if pick_str in seen_picks[screen_name]:
+                                    logger.info(f"Staging - Skipping duplicate single pick from @{screen_name} (ID {tweet_id}): {json.dumps(single_pick)}")
+                                    continue
+                                seen_picks[screen_name].add(pick_str)
+                                logger.info(f"Staging - Detected unique single pick: {json.dumps(single_pick)}")
+                                track_pick(tweet_id, "pick")
+                                if not has_been_actioned(tweet_id, "retweet"):
+                                    logger.info(f"Staging - Simulated retweet of tweet ID {tweet_id} from @{screen_name}")
+                                if not has_commented(tweet_id, my_username):
+                                    comment_text = "This pick was retweeted on my account! Follow for consolidated picks from the biggest sports betting accounts on X"
+                                    logger.info(f"Staging - Simulated comment on tweet ID {tweet_id} from @{screen_name} with: {comment_text}")
+                                logger.info(f"Staging - Retweeted and commented on single pick from @{screen_name} (ID {tweet_id}).")
+                        else:
+                            # Handle single pick
+                            pick_str = json.dumps(parsed_pick, sort_keys=True)
+                            if pick_str in seen_picks[screen_name]:
+                                logger.info(f"Staging - Skipping duplicate single pick from @{screen_name} (ID {tweet_id}): {pick}")
+                                continue
+                            seen_picks[screen_name].add(pick_str)
+                            logger.info(f"Staging - Detected unique single pick: {pick}")
+                            track_pick(tweet_id, "pick")
+                            if not has_been_actioned(tweet_id, "retweet"):
+                                logger.info(f"Staging - Simulated retweet of tweet ID {tweet_id} from @{screen_name}")
+                            if not has_commented(tweet_id, my_username):
+                                comment_text = "This pick was retweeted on my account! Follow for consolidated picks from the biggest sports betting accounts on X"
+                                logger.info(f"Staging - Simulated comment on tweet ID {tweet_id} from @{screen_name} with: {comment_text}")
+                            logger.info(f"Staging - Retweeted and commented on single pick from @{screen_name} (ID {tweet_id}).")
+                        # Mark the tweet as processed after successful pick detection
+                        redis_client.sadd(PROCESSED_SET_KEY, str(tweet_id))
+                    except json.JSONDecodeError as e:
+                        logger.error(f"Staging - Invalid JSON pick from @{screen_name} (ID {tweet_id}): {pick} (Error: {e})")
+                else:
+                    logger.info(f"Staging - No pick detected in tweet from @{screen_name} (ID {tweet_id}).")
+                    # Mark the tweet as processed even if no pick is detected (optional)
+                    redis_client.sadd(PROCESSED_SET_KEY, str(tweet_id))
+
+                tweets_processed_for_account += 1
+                total_tweets_processed += 1
+        else:
+            logger.info(f"Staging - No tweets found for @{screen_name} in the last 24 hours.")
+
+    logger.info(f"Staging - Processed {total_tweets_processed} tweets total from the last 24 hours.")
+    # Cleanup (optional): Close Redis connection if not managed globally
+    redis_client.close()
+
+def main():
+    poll_tweets()
+
+if __name__ == "__main__":
+    main()
