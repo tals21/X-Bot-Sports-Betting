@@ -1,0 +1,15 @@
+# Virtual environment
+venv/
+__pycache__/
+
+# Environment variables
+.env
+
+# Compiled Python files
+*.pyc
+*.pyo
+*.pyd
+
+# OS generated files
+.DS_Store
+.idea/
