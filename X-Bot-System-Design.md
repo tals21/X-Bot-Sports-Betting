@@ -1,39 +1,89 @@
-# X Bot System Design
+# System Design: Sports Betting Tweet Processing Bot
 
-## 1. Overview
-A Twitter/X bot for tracking sports betting picks from accounts like Alex Caruso and Dan Gamble AI, using NBA stats to validate picks in real-time.
+## Overview
+This system is designed to monitor Twitter/X accounts for sports betting picks, process them using AI (Grok), and perform actions (retweet, comment) while avoiding duplicates and tracking processed tweets. It is built to run in a staging environment with plans for production deployment using CI/CD.
 
-## 2. Objectives
-- Phase 1: Prototype with 5–10 accounts, real-time polling, and pick detection (regex, Grok, Grok vision).
-- Phase 2: Scale to thousands of accounts, streaming API, and production-ready features.
+## Architecture
+### Components
+1. **Twitter/X API Client**
+   - **Library**: `tweepy`
+   - **Purpose**: Fetches tweets from specified accounts using the Twitter API v2.
+   - **Authentication**: Uses a bearer token stored in an environment variable (`X_API_BEARER_TOKEN`).
+   - **Data**: Retrieves tweet text, metadata (e.g., `created_at`, `id`), and media (images).
 
-## 3. Data Sources
-- X API (Basic tier, $200/month).
-- Grok API (vision and text, ~$0.46 for Phase 1, ~$1,291/month for Phase 2).
-- NBA API (nba_api, free for Phase 1, potential switch to SportsDataIO for Phase 2).
+2. **Grok AI Client**
+   - **Library**: Custom `grok_client` (assumed)
+   - **Purpose**: Analyzes tweet text and images to extract betting picks in JSON format.
+   - **Authentication**: Uses an API key (`GROK_API_KEY`) from an environment variable.
+   - **Output**: JSON objects for single picks, parlays, or arrays of multiple picks.
 
-## 4. Pick Detection and Processing
-### Regex-Based Detection
-- Patterns capture prop bets, spreads, moneyline, and parlays from text-based tweets (e.g., Alex Caruso, Dan Gamble’s text posts).
-- Filters promotional content (e.g., "Join here," "VIP," "Drop Play #").
+3. **Redis Store**
+   - **Library**: `redis`
+   - **Purpose**: Tracks processed tweet IDs, action history (retweets, comments), and unique picks.
+   - **Configuration**: Connects via `REDIS_HOST` and `REDIS_PORT` from environment variables.
+   - **TTL**: Processed tweet IDs expire after 1 day (86400 seconds).
 
-### Grok API Integration
-- Falls back to Grok API if regex fails, using a structured prompt to extract picks from text.
-- Phase 1 (Prototype): Uses Grok vision for image-based tweets (e.g., Dan Gamble’s graphics) after validating regex for text, testing with 5–10 images.
-- Cost Estimate: ~$0.46 for Phase 1 (992,000 tokens), ~$1,291/month for Phase 2 (2.766M tokens).
+4. **Main Script (`prototype.py`)**
+   - **Language**: Python 3.9
+   - **Functionality**:
+     - Polls tweets from predefined accounts every 24 hours.
+     - Filters out replies, pinned tweets (>24 hours old), and processed tweets (via Redis).
+     - Detects picks using Grok and processes them (single, multiple, or parlay).
+     - Simulates retweets and comments, avoiding duplicates.
+   - **Dependencies**: `tweepy`, `redis`, `pillow` (for images), `openai`, `python-dotenv`.
+   - **Configuration**: Uses environment variables from a `.env` file (not committed; `.env.example` provided for reference). Production secrets managed via GitHub Secrets or secure server config.
 
-### Image Processing (Phase 1, After Text Validation)
-- Uses Grok vision to extract text and detect picks from image-based tweets (e.g., Dan Gamble’s graphics). Avoids OCR (e.g., `pytesseract`) to leverage Grok’s higher accuracy for stylized text and reduce setup overhead.
-- Tests with 5–10 images in Phase 1, ensuring costs remain low (~$0.46 total for Phase 1).
+5. **CI/CD Pipeline**
+   - **Platform**: GitHub Actions
+   - **Stages**: Lint (flake8), Test (unittest), Deploy
+   - **Environment**: Uses Redis service for testing, deploys to production on `main` push.
 
-## 5. Result Tracking
-- NBA Stats: Uses `nba_api` for live player stats (e.g., free throws, PRA) during the prototype phase. Polls every 5 minutes for real-time tracking, caching results in Redis.
-- Real-Time Tracking (Phase 1): Implements polling with `tweepy` (e.g., every 5 minutes) for 5–10 accounts, staying within Basic tier’s 15,000-read limit. Defers streaming to Phase 2 with Pro tier.
-- Future Consideration: Switch to SportsDataIO’s NBA API for production to access real-time scores, odds, and historical data, improving scalability and data richness.
+## Data Flow
+1. **Tweet Fetching**
+   - Twitter API polls up to 10 tweets per account from the last 24 hours.
+   - Filters applied: Skip replies, pinned tweets (>24 hours old), and processed tweets (via Redis).
 
-## 9. Cost and Efficiency
-- API Costs:
-  - X API: Basic tier ($200/month) for Phase 1, Pro tier ($5,000/month) for Phase 2.
-  - Grok API: ~$0.46 for Phase 1 (992,000 tokens), ~$1,291/month for Phase 2 (2.766M tokens).
-  - `nba_api`: Free for Phase 1, with potential switch to SportsDataIO (~$49–$99/month) in Phase 2.
-- Optimization: Uses regex-first to reduce Grok usage, caching (Redis) to minimize API calls, and polling to simulate real-time tracking within Basic tier limits.
+2. **Pick Detection**
+   - Text and optional images are sent to Grok.
+   - Grok returns:
+     - Single pick: `{"type": "prop", ...}`
+     - Parlay: `{"type": "parlay", "picks": [...], "odds": "..."}`
+     - Multiple picks: `[pick1, pick2, ...]`
+   - Invalid or result-based content returns `null`.
+
+3. **Processing**
+   - Checks for duplicate picks using an in-memory `seen_picks` set.
+   - Tracks actions (retweet, comment) in Redis, skipping if already done.
+   - Marks tweets as processed in Redis with a 1-day TTL.
+
+4. **Actions**
+   - Simulates retweet and posts a comment (e.g., "This pick was retweeted...").
+   - Logs all operations for debugging.
+
+## Design Decisions
+- **24-Hour Window**: Matches polling frequency and Redis TTL for consistency.
+- **Environment Variables**: Secures API keys using `.env` and `python-dotenv`.
+- **Duplicate Avoidance**: Combines in-memory (`seen_picks`) and persistent (Redis) checks.
+- **Scalability**: Limits to 10 tweets/account to manage API rate limits; extensible with pagination.
+
+## Dependencies
+- `tweepy`: Twitter API interaction
+- `redis`: Persistent storage
+- `pillow`: Image processing
+- `openai`: Potential future AI integration
+- `python-dotenv`: Environment variable management
+
+## Future Improvements
+- **Pagination**: Handle more than 10 tweets per account.
+- **Per-Tweet TTL**: Use hashes for individual tweet expirations if needed.
+- **Error Handling**: Add retries for API failures.
+- **Monitoring**: Integrate logging to a central system (e.g., ELK stack).
+
+## Deployment
+- **Staging**: Local or test server with mock data and a generated `.env` for testing.
+- **Production**: Deploy via CI/CD to a server, securing `.env` with a deployment script or vault.
+- **CI/CD**: GitHub Actions with lint, test, and deploy stages.
+
+## Contact
+- **Author**: Akhil
+- **Date**: March 18, 2025
