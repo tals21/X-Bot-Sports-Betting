@@ -1,7 +1,7 @@
 # System Design: Sports Betting Tweet Processing Bot
 
 ## Overview
-This system is designed to monitor Twitter/X accounts for sports betting picks, process them using AI (Grok), and perform actions (retweet, comment) while avoiding duplicates and tracking processed tweets. It is built to run in a staging environment with plans for production deployment using CI/CD.
+This system is designed to monitor Twitter/X accounts for sports betting picks, process them using AI (Grok), and perform actions (retweet, comment) while avoiding duplicates and tracking processed tweets. It is built to run in a staging environment with plans for production deployment using CI/CD, pick tracking
 
 ## Architecture
 ### Components
